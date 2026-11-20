@@ -5,6 +5,58 @@ exact numbers, open bottlenecks, next steps. Raw data stays in `_Build/bench/` (
 
 ---
 
+## 2026-11-20 — `kyty_elf` phase 2: segments, dynamic section, runtime-linker hardening
+
+Audit of `elf.cpp` + `runtimeLinker.cpp` (file-controlled values used as offset/index/size
+without checking the buffer they point into):
+
+| # | Where | Problem |
+|---|---|---|
+| A1 | `runtimeLinker.cpp` `RelocateRecord` → `PatchGuestMemory64` | 8-byte write at `base_vaddr + r_offset`, no range check: **arbitrary write into the emulator process** |
+| A2 | `ParseProgramDynamicInfo`, `Elf64::GetDynamicData` | `DT_OS_*` tables and sizes never checked against `PT_OS_DYNLIBDATA` |
+| A3 | `GetRelocationInfo` | relocation symbol index not checked against the symbol count |
+| A4 | symbol/SONAME/module/library names | name offsets unchecked, termination unchecked |
+| A5 | `Elf64::GetDynValue` / `GetDynList` | walk to `DT_NULL` with no bound |
+| A6 | `Elf64::LoadSegment` (SELF) | block's `phdr_id` indexes `m_phdr` unchecked |
+| A7 | `CalcBaseSize`, PT_LOAD loop | `p_filesz > p_memsz`, `p_vaddr + memsz` overflow, non-power-of-two `p_align` |
+| A8 | `LoadSegment` (plain ELF) | segment file range unchecked |
+
+Rust (`rust/kyty_elf`):
+- `parse()` now also checks every PT_LOAD/RELRO/DYNAMIC/DYNLIBDATA segment (A7, A8) and every
+  SELF block mapping (A6).
+- New `dynamic::validate(dynamic, dynlibdata, image_size)` (A1–A5): `DT_NULL` present; `DT_OS_*`
+  tables inside dynlibdata, `DT_*` tables inside the image; entry sizes; every relocation target
+  in `[0, image_size - 8]`; symbol indices < symbol count; every name offset < `STRSZ` and
+  NUL-terminated inside dynlibdata.
+- Rule: memory-safety violations are errors; in-bounds inconsistencies are warnings (a name
+  terminating past `STRSZ` but inside dynlibdata) and only get logged.
+- FFI: `kyty_elf_validate_dynamic(...)` → status + `KytyElfDynamicReport` (failing entry index,
+  warning count/first warning).
+
+C++ (independent of Rust, always compiled):
+- `RelocateRecord`: refuses any target outside `[base_vaddr, base_vaddr + base_size - 8]`.
+- `GetDynValue`/`GetDynList`: bounded by the `PT_DYNAMIC` size (now stored in `Elf64`).
+- `LoadSegment`: SELF block must map an existing program header.
+- These use `if (...) EXIT(...)`, not `EXIT_IF`, which compiles away under `KYTY_FINAL`.
+
+Verification:
+- `cargo test`: 26 tests (16 new: one per audit row plus edge cases); the dynamic fuzz test runs
+  40 k mutations of tag values and table bytes and asserts both outcomes occur > 1,000 times so
+  its in-bounds invariants are actually exercised. `cargo clippy --all-targets`: clean.
+- CI set + `kyty_elf_rust`: 33/33.
+- End to end (homebrew `hello_world`): valid → boots, no warnings. `r_offset` patched to
+  `0x7fff_ffff_0000` → `invalid dynamic section (relocation target outside module image,
+  entry 0)`. Symbol `st_name` past `STRSZ` → `invalid dynamic section (name offset past string
+  table size, entry 1)`. Both exit cleanly.
+- Same A1 file on a build with `-DKYTY_RUST_ELF=OFF`: the C++ check alone stops it
+  (`relocation target 0x00008008ffff0000 outside module image`); before, that was an 8-byte
+  write to an arbitrary host address.
+
+Not covered: contents of image-resident `DT_*` tables (only their ranges; PS5 titles use
+`DT_OS_*`), the hash table's contents (no consumer found).
+
+---
+
 ## 2026-11-20 — Presentation loop at idle (Tracy) — earlier GPU claim retracted
 
 Built `tracy-capture` and `tracy-csvexport` 0.14.1 (same version as the client in

@@ -51,6 +51,10 @@
 #endif
 #endif
 
+#if defined(KYTY_RUST_ELF)
+#include <kyty_elf.h>
+#endif
+
 namespace Libs::LibKernel {
 void SetProgName(const std::string& name);
 } // namespace Libs::LibKernel
@@ -867,6 +871,14 @@ static bool RelocateRecord(uint32_t index, Elf64_Rela* r, Program* program, bool
 		}
 	}
 
+	// The target comes from the file: never write outside the module image.
+	if (program->base_size < sizeof(uint64_t) || ri.vaddr < program->base_vaddr ||
+	    ri.vaddr - program->base_vaddr > program->base_size - sizeof(uint64_t)) {
+		EXIT("relocation target 0x%016" PRIx64 " outside module image [0x%016" PRIx64
+		     ", +0x%" PRIx64 "): %s\n",
+		     ri.vaddr, program->base_vaddr, program->base_size,
+		     Common::PathToString(program->file_name).c_str());
+	}
 	const bool patched = PatchGuestMemory64(ri.vaddr, value);
 	if (patched && stubbed) {
 		LOGF("Relocate: unresolved %s import patched to stub [%u] [%016" PRIx64 "] <- %016" PRIx64
@@ -1875,6 +1887,23 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program) {
 	program->dynamic_info = std::make_unique<DynamicInfo>();
 
 	auto* elf = program->elf.get();
+
+#if defined(KYTY_RUST_ELF)
+	// Every table, relocation target, symbol index and name below is checked first.
+	KytyElfDynamicReport report {};
+	if (kyty_elf_validate_dynamic(reinterpret_cast<const uint8_t*>(elf->GetDynamic()),
+	                              elf->GetDynamicSize(), elf->GetDynamicData<const uint8_t*>(0),
+	                              elf->GetDynamicDataSize(), program->base_size, &report) != 0) {
+		EXIT("invalid dynamic section (%s, entry %" PRIu64 "): %s\n",
+		     kyty_elf_error_name(report.error), report.error_index,
+		     Common::PathToString(program->file_name).c_str());
+	}
+	if (report.warnings != 0) {
+		LOGF("dynamic section: %u warning(s), first: %s (entry %" PRIu64 "): %s\n", report.warnings,
+		     kyty_elf_error_name(report.first_warning), report.first_warning_index,
+		     Common::PathToString(program->file_name).c_str());
+	}
+#endif
 
 	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_HASH) && elf->HasDynValue(DT_HASH));
 	GetDynDataOs(elf, &program->dynamic_info->hash_table, DT_OS_HASH);

@@ -1,6 +1,7 @@
 //! C ABI. The only `unsafe` in the crate lives here: calling the C++ read callback and
 //! dereferencing the pointers C++ hands us. See `include/kyty_elf.h` for the contract.
 
+use crate::dynamic::{self, Code};
 use crate::{parse, Error, Layout, Source};
 use std::ffi::{c_char, c_void};
 
@@ -103,11 +104,75 @@ pub unsafe extern "C" fn kyty_elf_ehdr_offset(elf: *const KytyElf) -> u64 {
 	elf.as_ref().map_or(0, |KytyElf(l)| l.ehdr_offset)
 }
 
-/// Static, NUL-terminated description of an error code from `kyty_elf_open`.
+/// Outcome of `kyty_elf_validate_dynamic`.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct DynamicReport {
+	/// 0, or the error code (also the return value).
+	pub error: i32,
+	/// Index of the dynamic entry, symbol or relocation that failed.
+	pub error_index: u64,
+	pub warnings: u32,
+	/// First warning code (0 if none) and its index.
+	pub first_warning: i32,
+	pub first_warning_index: u64,
+}
+
+/// Validates a module's dynamic section and tables before the runtime linker uses them.
+/// `dynamic`/`data` may be null only when their size is 0.
+///
+/// # Safety
+/// `dynamic` and `data` must be valid for reads of their sizes; `report` must be null or valid
+/// for writes.
+#[no_mangle]
+pub unsafe extern "C" fn kyty_elf_validate_dynamic(
+	dynamic: *const u8,
+	dynamic_size: u64,
+	data: *const u8,
+	data_size: u64,
+	image_size: u64,
+	report: *mut DynamicReport,
+) -> i32 {
+	// SAFETY: the caller guarantees each pointer is readable for its size (or the size is 0).
+	let slice = |p: *const u8, n: u64| match usize::try_from(n) {
+		Ok(0) => Some(&[][..]),
+		Ok(n) if !p.is_null() => Some(std::slice::from_raw_parts(p, n)),
+		_ => None,
+	};
+	let (Some(dynamic), Some(data)) = (slice(dynamic, dynamic_size), slice(data, data_size)) else {
+		return Code::NotTerminated as i32;
+	};
+	let mut out = DynamicReport { error: 0, error_index: 0, warnings: 0, first_warning: 0, first_warning_index: 0 };
+	match dynamic::validate(dynamic, data, image_size) {
+		Ok(r) => {
+			out.warnings = u32::try_from(r.warnings.len()).unwrap_or(u32::MAX);
+			if let Some(w) = r.warnings.first() {
+				out.first_warning = w.code as i32;
+				out.first_warning_index = w.index;
+			}
+		}
+		Err(e) => {
+			out.error = e.code as i32;
+			out.error_index = e.index;
+		}
+	}
+	if let Some(r) = report.as_mut() {
+		*r = out;
+	}
+	out.error
+}
+
+/// Static, NUL-terminated description of an error or warning code from this library.
 #[no_mangle]
 pub extern "C" fn kyty_elf_error_name(code: i32) -> *const c_char {
-	match code {
-		0 => c"ok".as_ptr(),
-		_ => Error::ALL.iter().find(|e| **e as i32 == code).map_or(c"unknown error", |e| e.name()).as_ptr(),
+	if code == 0 {
+		return c"ok".as_ptr();
 	}
+	Error::ALL
+		.iter()
+		.find(|e| **e as i32 == code)
+		.map(|e| e.name())
+		.or_else(|| Code::ALL.iter().find(|c| **c as i32 == code).map(|c| c.name()))
+		.unwrap_or(c"unknown error")
+		.as_ptr()
 }

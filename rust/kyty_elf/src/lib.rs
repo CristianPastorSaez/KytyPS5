@@ -7,6 +7,7 @@
 //!
 //! The core ([`parse`]) is safe Rust; `unsafe` is confined to the [`ffi`] module.
 
+pub mod dynamic;
 pub mod ffi;
 
 /// On-disk sizes. The C++ side `static_assert`s its structs against these.
@@ -57,10 +58,20 @@ pub enum Error {
 	/// Non-empty string table whose last byte is not NUL: name lookups could run off the end.
 	StrtabNotTerminated = 7,
 	ReadFailed = 8,
+	/// `p_filesz > p_memsz`: loading would write past the segment.
+	SegmentFileExceedsMemory = 9,
+	/// `p_vaddr + aligned p_memsz` overflows.
+	SegmentAddressOverflow = 10,
+	/// `p_align` is not 0 or a power of two.
+	SegmentBadAlignment = 11,
+	/// A loaded segment's file range lies outside the file.
+	SegmentOutOfFile = 12,
+	/// A SELF block maps a program header that does not exist, or lies outside the file.
+	SelfSegmentBadMapping = 13,
 }
 
 impl Error {
-	pub const ALL: [Error; 8] = [
+	pub const ALL: [Error; 13] = [
 		Error::TooSmall,
 		Error::SelfSegmentsOutOfRange,
 		Error::EhdrOutOfRange,
@@ -69,6 +80,11 @@ impl Error {
 		Error::StrtabOutOfRange,
 		Error::StrtabNotTerminated,
 		Error::ReadFailed,
+		Error::SegmentFileExceedsMemory,
+		Error::SegmentAddressOverflow,
+		Error::SegmentBadAlignment,
+		Error::SegmentOutOfFile,
+		Error::SelfSegmentBadMapping,
 	];
 
 	pub fn name(self) -> &'static std::ffi::CStr {
@@ -81,6 +97,11 @@ impl Error {
 			Error::StrtabOutOfRange => c"section name string table out of file bounds",
 			Error::StrtabNotTerminated => c"section name string table not NUL-terminated",
 			Error::ReadFailed => c"read failed",
+			Error::SegmentFileExceedsMemory => c"segment file size exceeds memory size",
+			Error::SegmentAddressOverflow => c"segment address range overflows",
+			Error::SegmentBadAlignment => c"segment alignment not a power of two",
+			Error::SegmentOutOfFile => c"segment file range out of file bounds",
+			Error::SelfSegmentBadMapping => c"SELF block maps a missing program header or lies outside the file",
 		}
 	}
 }
@@ -117,6 +138,51 @@ fn is_known_self(h: &[u8]) -> bool {
 	let tail = (h[4..12] == [0x00, 0x01, 0x01, 0x12, 0x01, 0x01, 0x00, 0x00] && unknown == 0x22)
 		|| (h[4..12] == [0x10, 0x01, 0x01, 0x12, 0x01, 0x01, 0x00, 0x10] && unknown == 0x32);
 	magic && tail
+}
+
+const PT_LOAD: u32 = 1;
+const PT_DYNAMIC: u32 = 2;
+const PT_OS_DYNLIBDATA: u32 = 0x6100_0000;
+const PT_OS_RELRO: u32 = 0x6100_0010;
+
+/// Checks every segment the loader maps or copies, and the SELF block -> program header mapping
+/// `Elf64::LoadSegment` relies on.
+fn check_segments(l: &Layout, file_size: u64) -> Result<(), Error> {
+	let phnum = (l.phdrs.len() as u64) / PHDR_SIZE;
+	for p in l.phdrs.as_chunks::<{ PHDR_SIZE as usize }>().0.iter() {
+		let p_type = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+		let (offset, vaddr, filesz, memsz, align) = (u64_at(p, 8), u64_at(p, 16), u64_at(p, 32), u64_at(p, 40), u64_at(p, 48));
+		let loaded = p_type == PT_LOAD || p_type == PT_OS_RELRO;
+		let copied = p_type == PT_DYNAMIC || p_type == PT_OS_DYNLIBDATA;
+		if loaded && memsz != 0 {
+			if filesz > memsz {
+				return Err(Error::SegmentFileExceedsMemory);
+			}
+			if align > 1 && !align.is_power_of_two() {
+				return Err(Error::SegmentBadAlignment);
+			}
+			let aligned = if align > 1 { memsz.checked_add(align - 1).map(|v| v & !(align - 1)) } else { Some(memsz) };
+			aligned.and_then(|a| vaddr.checked_add(a)).ok_or(Error::SegmentAddressOverflow)?;
+		}
+		if loaded || copied {
+			// SELF program headers use ELF offsets; only the size can be bounded by the file here.
+			let end = if l.is_self { Some(filesz) } else { offset.checked_add(filesz) };
+			if end.is_none_or(|e| e > file_size) {
+				return Err(Error::SegmentOutOfFile);
+			}
+		}
+	}
+	for s in l.self_segments.as_chunks::<{ SELF_SEGMENT_SIZE as usize }>().0.iter() {
+		let seg_type = u64_at(s, 0);
+		if seg_type & 0x800 != 0 {
+			let phdr_id = (seg_type >> 20) & 0xfff;
+			let end = u64_at(s, 8).checked_add(u64_at(s, 16)); // offset + compressed_size: bytes in the file
+			if phdr_id >= phnum || end.is_none_or(|e| e > file_size) {
+				return Err(Error::SelfSegmentBadMapping);
+			}
+		}
+	}
+	Ok(())
 }
 
 /// Reads `count * entry` bytes at `offset`, or `err` if that range is not inside the file.
@@ -165,6 +231,7 @@ pub fn parse<S: Source>(src: &mut S) -> Result<Layout, Error> {
 
 	let phdr_at = out.ehdr_offset.checked_add(phoff).ok_or(Error::PhdrsOutOfRange)?;
 	out.phdrs = read_table(src, phdr_at, phnum, PHDR_SIZE, Error::PhdrsOutOfRange)?;
+	check_segments(&out, src.size())?;
 
 	if !out.is_self && shnum != 0 {
 		let shdr_at = out.ehdr_offset.checked_add(shoff).ok_or(Error::ShdrsOutOfRange)?;
@@ -186,3 +253,5 @@ pub fn parse<S: Source>(src: &mut S) -> Result<Layout, Error> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_dynamic;

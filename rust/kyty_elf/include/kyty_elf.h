@@ -34,6 +34,23 @@ int32_t     kyty_elf_is_self(const KytyElf* elf);
 uint64_t    kyty_elf_ehdr_offset(const KytyElf* elf);
 const char* kyty_elf_error_name(int32_t code);
 
+/* Outcome of kyty_elf_validate_dynamic. Error codes are memory-safety violations; warnings
+ * (first_warning != 0) are in-bounds inconsistencies worth logging. */
+typedef struct KytyElfDynamicReport {
+	int32_t  error;       /* 0 or the error code (also the return value) */
+	uint64_t error_index; /* dynamic entry, symbol or relocation that failed */
+	uint32_t warnings;
+	int32_t  first_warning;
+	uint64_t first_warning_index;
+} KytyElfDynamicReport;
+
+/* Validates PT_DYNAMIC (`dynamic`), PT_OS_DYNLIBDATA (`data`) and every table, relocation target
+ * (must lie in [0, image_size - 8]), symbol index and name the runtime linker will use.
+ * Pointers may be null only when their size is 0. `report` may be null. */
+int32_t kyty_elf_validate_dynamic(const uint8_t* dynamic, uint64_t dynamic_size, const uint8_t* data,
+                                  uint64_t data_size, uint64_t image_size,
+                                  KytyElfDynamicReport* report);
+
 #ifdef __cplusplus
 }
 #endif

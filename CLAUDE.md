@@ -45,8 +45,14 @@ Commits stay local until the owner explicitly approves each push.
   clean, `Cargo.lock` committed (builds use `--locked`). Each crate ships a `<crate>.cmake` that
   builds it with cargo, exposes an IMPORTED target and registers its tests with ctest; a
   `KYTY_RUST_*` option falls back to the C++ path when cargo is missing.
-- Existing Rust modules: `rust/kyty_elf` — bounds-checked SELF/ELF header table reader used by
-  `Loader::Elf64::Open` (`KYTY_RUST_ELF`, default ON). C++ keeps the file I/O and `IsValid`.
+- Existing Rust modules: `rust/kyty_elf` — bounds-checked SELF/ELF header tables and segments
+  (`Loader::Elf64::Open`) plus dynamic-section validation (`RuntimeLinker::ParseProgramDynamicInfo`),
+  `KYTY_RUST_ELF` default ON. C++ keeps the file I/O, `IsValid`, and its own range checks.
+- `EXIT_IF` compiles to nothing under `KYTY_FINAL`: security/bounds checks must use
+  `if (...) EXIT(...)`.
+- Formatting: run the pinned clang-format (22.1.3, via `pre-commit`) only on the lines you
+  changed (`--lines`); upstream files are not all clean under that version, and whole-file
+  reformatting buries the real diff. Write files with LF line endings.
 
 ## Build (Windows)
 

@@ -1,7 +1,7 @@
 use super::*;
 
 /// Synthetic next-gen ELF: header, 2 program headers, 3 section headers, string table.
-fn synthetic_elf() -> Vec<u8> {
+pub(crate) fn synthetic_elf() -> Vec<u8> {
 	let strtab = b"\0.text\0.shstrtab\0";
 	let phoff = EHDR_SIZE;
 	let shoff = phoff + 2 * PHDR_SIZE;
@@ -95,7 +95,7 @@ fn too_small() {
 	assert_eq!(parse_bytes(&[0u8; 10]).unwrap_err(), Error::TooSmall);
 }
 
-fn self_wrapped(segments: u16) -> Vec<u8> {
+pub(crate) fn self_wrapped(segments: u16) -> Vec<u8> {
 	let mut f = vec![0u8; SELF_HEADER_SIZE as usize];
 	f[0..12].copy_from_slice(&[0x4f, 0x15, 0x3d, 0x1d, 0x00, 0x01, 0x01, 0x12, 0x01, 0x01, 0x00, 0x00]);
 	put_u16(&mut f, 24, segments);

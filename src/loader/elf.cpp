@@ -302,6 +302,10 @@ void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size) {
 			const auto& seg = m_self_segments[i];
 			if ((seg.type & 0x800u) != 0) {
 				auto phdr_id = ((seg.type >> 20u) & 0xFFFu);
+				if (m_ehdr == nullptr || phdr_id >= m_ehdr->e_phnum) {
+					EXIT("SELF block maps missing program header %" PRIu64 "\n",
+					     static_cast<uint64_t>(phdr_id));
+				}
 
 				const auto& phdr = m_phdr[phdr_id];
 
@@ -335,10 +339,15 @@ void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size) {
 	}
 }
 
+// Both stop at DT_NULL or at the end of PT_DYNAMIC, whichever comes first.
 const Elf64_Dyn* Elf64::GetDynValue(Elf64_Sxword tag) const {
-	for (const auto* dyn = GetDynamic(); dyn->d_tag != DT_NULL; dyn++) {
-		if (dyn->d_tag == tag) {
-			return dyn;
+	const auto* dyn = GetDynamic();
+	for (uint64_t i = 0; dyn != nullptr && i < m_dynamic_size / sizeof(Elf64_Dyn); i++) {
+		if (dyn[i].d_tag == DT_NULL) {
+			break;
+		}
+		if (dyn[i].d_tag == tag) {
+			return dyn + i;
 		}
 	}
 	return nullptr;
@@ -346,9 +355,13 @@ const Elf64_Dyn* Elf64::GetDynValue(Elf64_Sxword tag) const {
 
 std::vector<const Elf64_Dyn*> Elf64::GetDynList(Elf64_Sxword tag) const {
 	std::vector<const Elf64_Dyn*> ret;
-	for (const auto* dyn = GetDynamic(); dyn->d_tag != DT_NULL; dyn++) {
-		if (dyn->d_tag == tag) {
-			ret.push_back(dyn);
+	const auto*                   dyn = GetDynamic();
+	for (uint64_t i = 0; dyn != nullptr && i < m_dynamic_size / sizeof(Elf64_Dyn); i++) {
+		if (dyn[i].d_tag == DT_NULL) {
+			break;
+		}
+		if (dyn[i].d_tag == tag) {
+			ret.push_back(dyn + i);
 		}
 	}
 	return ret;
@@ -396,6 +409,8 @@ void Elf64::Clear() {
 	m_str_table_size = 0;
 	m_dynamic.reset();
 	m_dynamic_data.reset();
+	m_dynamic_size      = 0;
+	m_dynamic_data_size = 0;
 }
 
 void Elf64::DbgDump(const std::string& folder) {
@@ -665,10 +680,12 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 		for (Elf64_Half i = 0; i < m_ehdr->e_phnum; i++) {
 			switch (m_phdr[i].p_type) {
 				case PT_DYNAMIC:
-					m_dynamic = LoadDynamic64(this, m_phdr[i].p_offset, m_phdr[i].p_filesz);
+					m_dynamic      = LoadDynamic64(this, m_phdr[i].p_offset, m_phdr[i].p_filesz);
+					m_dynamic_size = m_phdr[i].p_filesz;
 					break;
 				case PT_OS_DYNLIBDATA:
 					m_dynamic_data = LoadDynamic64(this, m_phdr[i].p_offset, m_phdr[i].p_filesz);
+					m_dynamic_data_size = m_phdr[i].p_filesz;
 					break;
 				default: break;
 			}
