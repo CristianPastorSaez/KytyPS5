@@ -4,6 +4,25 @@
 > subsystems**: measuring real bottlenecks (ETW/WPR, Tracy, synthetic suites), fixing them in C++
 > with before/after numbers, and adding **memory-safe Rust modules** (C-ABI `staticlib`s built
 > through CMake) where untrusted input is parsed, starting with the ELF/SELF loader.
+>
+> **1. Virtual-memory page tables (`RegionTable`, C++).** The GPU memory tracker and page manager
+> allocated their 4 Mi-entry atomic page tables with value-initialisation, touching 32 MiB per
+> table at startup. `RegionTable` uses `std::calloc` (zero pages the OS maps on first use) plus
+> `std::atomic_ref` for the same acquire/release semantics. Same tools, before → after:
+>
+> | Test suite | Wall time | Page faults | Peak working set |
+> |---|---|---|---|
+> | `memory_tracker_tests` | 0.364 → 0.090 s (**−75 %**) | 280,618 → 1,612 (**−99.4 %**) | 68.9 → 5.3 MiB |
+> | `page_manager_tests` | 0.230 → 0.118 s (−49 %) | 75,336 → 1,484 (−98.0 %) | 36.9 → 5.2 MiB |
+>
+> **2. Loader / runtime-linker hardening (`rust/kyty_elf`, Rust).** A C-ABI `staticlib` validates
+> SELF/ELF headers, program and section header tables, loadable segments and the `PT_DYNAMIC`
+> section (tables, relocation targets, symbol indices, string offsets) before the C++ loader
+> trusts them. It closes the 8 out-of-bounds read/write paths found in the audit (A1–A8), including
+> an arbitrary 8-byte guest write through a relocation's `r_offset`. Covered by 26 unit tests with
+> deterministic fuzzing; the C++ side keeps its own range checks (`if`/`EXIT`, kept in final
+> builds) so it stays safe when built without Rust (`-DKYTY_RUST_ELF=OFF`).
+>
 > Fixes meant for upstream are developed on clean branches cut from `main`; this branch also
 > carries the fork's own notes: [`DEVLOG.md`](DEVLOG.md) (measurements and progress) and
 > [`CLAUDE.md`](CLAUDE.md) (conventions for AI-assisted work). The work is clean-room only:
