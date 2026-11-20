@@ -30,10 +30,8 @@
 namespace Libs::Graphics {
 namespace {
 
-constexpr uint64_t PAGE_SIZE    = TRACKER_PAGE_SIZE;
-constexpr uint64_t REGION_SIZE  = TRACKER_REGION_SIZE;
-constexpr uint64_t ADDRESS_SIZE = TRACKER_ADDRESS_SIZE;
-constexpr uint64_t REGION_COUNT = ADDRESS_SIZE / REGION_SIZE;
+constexpr uint64_t PAGE_SIZE   = TRACKER_PAGE_SIZE;
+constexpr uint64_t REGION_SIZE = TRACKER_REGION_SIZE;
 
 constexpr uint64_t REGION_PAGES = REGION_SIZE / PAGE_SIZE;
 
@@ -151,7 +149,6 @@ struct PageManager::Impl {
 			Fatal("unsupported host page size %ld", static_cast<long>(host_page_size));
 		}
 #endif
-		regions = std::make_unique<std::atomic<Region*>[]>(REGION_COUNT);
 	}
 
 	~Impl() {
@@ -165,23 +162,21 @@ struct PageManager::Impl {
 		}
 	}
 
-	Region* FindRegion(uint64_t vaddr) const noexcept {
-		return regions[vaddr / REGION_SIZE].load(std::memory_order_acquire);
-	}
+	Region* FindRegion(uint64_t vaddr) const noexcept { return regions.Load(vaddr / REGION_SIZE); }
 
 	Region* GetOrCreateRegion(uint64_t vaddr) {
 		const auto index = vaddr / REGION_SIZE;
-		if (auto* region = regions[index].load(std::memory_order_acquire); region != nullptr) {
+		if (auto* region = regions.Load(index); region != nullptr) {
 			return region;
 		}
 		std::lock_guard lock(region_mutex);
-		if (auto* region = regions[index].load(std::memory_order_acquire); region != nullptr) {
+		if (auto* region = regions.Load(index); region != nullptr) {
 			return region;
 		}
 		auto  region = std::make_unique<Region>();
 		auto* ptr    = region.get();
 		region_storage.push_back(std::move(region));
-		regions[index].store(ptr, std::memory_order_release);
+		regions.Store(index, ptr);
 		return ptr;
 	}
 
@@ -250,7 +245,7 @@ struct PageManager::Impl {
 		const auto begin = Common::AlignDown(vaddr, PAGE_SIZE);
 		const auto end   = Common::AlignUp(vaddr + size, PAGE_SIZE);
 		for (auto chunk_begin = begin; chunk_begin < end;) {
-			const auto chunk_end = std::min(end, Common::AlignUp(chunk_begin + 1, REGION_SIZE));
+			const auto chunk_end   = std::min(end, Common::AlignUp(chunk_begin + 1, REGION_SIZE));
 			const auto region_base = Common::AlignDown(chunk_begin, REGION_SIZE);
 			auto*      region = track ? GetOrCreateRegion(chunk_begin) : FindRegion(chunk_begin);
 			if (region == nullptr) {
@@ -263,9 +258,9 @@ struct PageManager::Impl {
 		}
 	}
 
-	std::unique_ptr<std::atomic<Region*>[]> regions;
-	std::vector<std::unique_ptr<Region>>    region_storage;
-	std::mutex                              region_mutex;
+	RegionTable<Region>                  regions;
+	std::vector<std::unique_ptr<Region>> region_storage;
+	std::mutex                           region_mutex;
 };
 
 static_assert(std::atomic<void*>::is_always_lock_free);

@@ -95,8 +95,6 @@ public:
 	}
 
 private:
-	static constexpr size_t REGION_COUNT = TRACKER_ADDRESS_SIZE / TRACKER_REGION_SIZE;
-
 	template <bool create, typename Func>
 	bool Iterate(uint64_t vaddr, uint64_t size, Func&& func) {
 		ValidateRange(vaddr, size);
@@ -107,7 +105,7 @@ private:
 		uint64_t       offset       = vaddr % TRACKER_REGION_SIZE;
 		while (remaining != 0) {
 			const auto bytes   = std::min(TRACKER_REGION_SIZE - offset, remaining);
-			auto*      manager = m_regions[index].load(std::memory_order_acquire);
+			auto*      manager = m_regions.Load(index);
 			if (manager == nullptr && create) {
 				manager = GetOrCreateRegion(index);
 			}
@@ -130,10 +128,10 @@ private:
 	static void    ValidateRange(uint64_t vaddr, uint64_t size);
 	RegionManager* GetOrCreateRegion(uint64_t index);
 
-	std::unique_ptr<std::atomic<RegionManager*>[]> m_regions;
-	std::vector<std::unique_ptr<RegionManager>>    m_region_storage;
-	std::mutex                                     m_region_mutex;
-	PageManager&                                   m_page_manager;
+	RegionTable<RegionManager>                  m_regions;
+	std::vector<std::unique_ptr<RegionManager>> m_region_storage;
+	std::mutex                                  m_region_mutex;
+	PageManager&                                m_page_manager;
 };
 
 } // namespace Libs::Graphics
