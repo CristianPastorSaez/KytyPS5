@@ -5,6 +5,38 @@ exact numbers, open bottlenecks, next steps. Raw data stays in `_Build/bench/` (
 
 ---
 
+## 2026-11-20 — Module #2: `kyty_elf` Rust crate (ELF/SELF header tables)
+
+Problem: `elf.cpp` read the SELF segment table, program/section header tables and the
+section-name string table with `Seek(offset)` + `Read(count * size)` straight from header
+fields — no check that the range fits the file, unchecked short reads (uninitialised structs),
+and a string table that might not be NUL-terminated.
+
+Design: `rust/kyty_elf` (no dependencies). C++ keeps the file I/O (read callback over
+`Common::File`) and the semantic checks (`IsSelf`, `IsValid` with their logs); Rust reads every
+table only after checking `offset + count * size` against the file size with overflow-safe
+arithmetic, rejects string tables > 4 GiB or not NUL-terminated, and returns raw bytes that C++
+`memcpy`s into its structs (`static_assert`ed sizes). Fields are decoded with `from_le_bytes`;
+`unsafe` exists only in `ffi.rs`. CMake: `KYTY_RUST_ELF` (ON, falls back to C++ without cargo),
+cargo builds into `<build>/rust`, tests registered as ctest `kyty_elf_rust`.
+
+Verification:
+- `cargo test`: 10 tests — valid ELF, SELF-wrapped ELF, table past EOF, `phoff` overflow, bad
+  string table, SELF segments past EOF, unknown SELF tail, too small, and a deterministic fuzz
+  test (all truncations + 40 k mutations of offset/count fields): no panics, every returned
+  table matches its header. `cargo clippy --all-targets`: clean.
+- CI set 32/32 with the Rust reader linked into `kyty_emulator`.
+- Homebrew `hello_world` boots exactly as before (`main: Hello world!`).
+- Same homebrew with `e_phnum = 0xFFFF`: `ELF: ...: program header table out of file bounds`,
+  then a controlled `elf is not valid` exit instead of reading past the file.
+
+Behaviour change: a structurally broken file is now rejected before `IsValid` runs, so its log
+names the out-of-range table instead of an `IsValid` reason. Out of scope (next): the
+`PT_DYNAMIC` / `PT_OS_DYNLIBDATA` loads through `LoadSegment`, and dynamic-table parsing in
+`runtimeLinker.cpp`.
+
+---
+
 ## 2026-11-20 — Patch #1: lazy region lookup tables (`fix/lazy-page-tables`, `96986ee6`)
 
 `MemoryTracker` and `PageManager::Impl` replaced `std::make_unique<std::atomic<T*>[]>(2^22)`
@@ -93,4 +125,4 @@ open-world games (#1937) — needs a real title run locally with Tracy.
 
 ### Next
 - ~~Patch #1~~ done (see entry above).
-- Then: `kyty_elf` Rust crate.
+- ~~`kyty_elf` Rust crate~~ done (see entry above). Next: dynamic segment loads + runtime linker tables.

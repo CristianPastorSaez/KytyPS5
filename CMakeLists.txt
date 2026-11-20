@@ -337,6 +337,11 @@ endif()
 
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus OpenXR::openxr_loader libzstd_static)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/rust/kyty_elf/kyty_elf.cmake")
+if(KYTY_RUST_ELF)
+	list(APPEND kyty_emulator_link_libraries kyty_elf)
+endif()
+
 # Linux system libraries.
 if(LINUX)
 	find_package(Threads REQUIRED)

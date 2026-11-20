@@ -7,9 +7,57 @@
 #include <cstring>
 #include <memory>
 
+#if defined(KYTY_RUST_ELF)
+#include <kyty_elf.h>
+#endif
+
 namespace Loader {
 
-static std::unique_ptr<SelfHeader> LoadSelf(Common::File& f) {
+#if defined(KYTY_RUST_ELF)
+// kyty_elf hands back raw on-disk bytes; these structs must match them exactly.
+static_assert(sizeof(SelfHeader) == 32 && sizeof(SelfSegment) == 32);
+static_assert(sizeof(Elf64_Ehdr) == 64 && sizeof(Elf64_Phdr) == 56 && sizeof(Elf64_Shdr) == 64);
+
+template <typename T>
+static std::unique_ptr<T> CopyOne(const KytyElf* elf, int32_t table) {
+	uint64_t    size  = 0;
+	const auto* bytes = kyty_elf_table(elf, table, &size);
+	if (size != sizeof(T)) {
+		return nullptr;
+	}
+	auto out = std::make_unique<T>();
+	std::memcpy(out.get(), bytes, sizeof(T));
+	return out;
+}
+
+template <typename T>
+static std::unique_ptr<T[]> CopyTable(const KytyElf* elf, int32_t table,
+                                      uint64_t* size_out = nullptr) {
+	uint64_t    size  = 0;
+	const auto* bytes = kyty_elf_table(elf, table, &size);
+	if (size_out != nullptr) {
+		*size_out = size;
+	}
+	if (size == 0) {
+		return nullptr;
+	}
+	auto out = std::make_unique<T[]>(size / sizeof(T));
+	std::memcpy(out.get(), bytes, size);
+	return out;
+}
+
+static int32_t ReadFileRange(void* ctx, uint64_t offset, uint8_t* dst, uint64_t size) {
+	auto* f = static_cast<Common::File*>(ctx);
+	if (size > UINT32_MAX || !f->Seek(offset)) {
+		return 0;
+	}
+	uint32_t bytes_read = 0;
+	f->Read(dst, static_cast<uint32_t>(size), &bytes_read);
+	return bytes_read == size ? 1 : 0;
+}
+#endif
+
+[[maybe_unused]] static std::unique_ptr<SelfHeader> LoadSelf(Common::File& f) {
 	if (f.Remaining() < sizeof(SelfHeader)) {
 		return nullptr;
 	}
@@ -21,7 +69,8 @@ static std::unique_ptr<SelfHeader> LoadSelf(Common::File& f) {
 	return self;
 }
 
-static std::unique_ptr<SelfSegment[]> LoadSelfSegments(Common::File& f, uint16_t num) {
+[[maybe_unused]] static std::unique_ptr<SelfSegment[]> LoadSelfSegments(Common::File& f,
+                                                                        uint16_t      num) {
 	auto segs = std::make_unique<SelfSegment[]>(num);
 
 	f.Read(segs.get(), sizeof(SelfSegment) * num);
@@ -29,7 +78,7 @@ static std::unique_ptr<SelfSegment[]> LoadSelfSegments(Common::File& f, uint16_t
 	return segs;
 }
 
-static std::unique_ptr<Elf64_Ehdr> LoadEhdr64(Common::File& f) {
+[[maybe_unused]] static std::unique_ptr<Elf64_Ehdr> LoadEhdr64(Common::File& f) {
 	if (f.Remaining() < sizeof(Elf64_Ehdr)) {
 		return nullptr;
 	}
@@ -51,7 +100,8 @@ static void SaveEhdr64(Common::File& f, const Elf64_Ehdr* ehdr) {
 	EXIT_IF(bytes_written == 0);
 }
 
-static std::unique_ptr<Elf64_Phdr[]> LoadPhdr64(Common::File& f, uint64_t offset, Elf64_Half num) {
+[[maybe_unused]] static std::unique_ptr<Elf64_Phdr[]> LoadPhdr64(Common::File& f, uint64_t offset,
+                                                                 Elf64_Half num) {
 	auto phdr = std::make_unique<Elf64_Phdr[]>(num);
 
 	f.Seek(offset);
@@ -71,7 +121,8 @@ static void SavePhdr64(Common::File& f, uint64_t offset, Elf64_Half num, const E
 	EXIT_IF(bytes_written == 0);
 }
 
-static std::unique_ptr<Elf64_Shdr[]> LoadShdr64(Common::File& f, uint64_t offset, Elf64_Half num) {
+[[maybe_unused]] static std::unique_ptr<Elf64_Shdr[]> LoadShdr64(Common::File& f, uint64_t offset,
+                                                                 Elf64_Half num) {
 	if (num == 0) {
 		return nullptr;
 	}
@@ -110,7 +161,8 @@ static std::unique_ptr<uint8_t[]> LoadDynamic64(Elf64* f, uint64_t offset, uint6
 	return dynamic_data;
 }
 
-static std::unique_ptr<char[]> LoadStrTable(Common::File& f, uint64_t offset, uint32_t size) {
+[[maybe_unused]] static std::unique_ptr<char[]> LoadStrTable(Common::File& f, uint64_t offset,
+                                                             uint32_t size) {
 	if (size == 0) {
 		return nullptr;
 	}
@@ -539,6 +591,42 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 		EXIT("Can't open %s\n", Common::PathToString(file_name).c_str());
 	}
 
+#if defined(KYTY_RUST_ELF)
+	// Every table range is checked against the file size in Rust before it is read.
+	KytyElf*   parsed = nullptr;
+	const auto rc     = kyty_elf_open(m_f.get(), ReadFileRange, m_f->Size(), &parsed);
+	const std::unique_ptr<KytyElf, decltype(&kyty_elf_free)> parsed_guard(parsed, &kyty_elf_free);
+	if (rc != 0) {
+		LOGF("ELF: %s: %s\n", Common::PathToString(file_name).c_str(), kyty_elf_error_name(rc));
+		return; // m_ehdr stays null, so IsValid() rejects the file
+	}
+
+	m_self = CopyOne<SelfHeader>(parsed, KYTY_ELF_TABLE_SELF_HEADER);
+	if (!IsSelf()) {
+		m_self.reset();
+	} else {
+		m_self_segments = CopyTable<SelfSegment>(parsed, KYTY_ELF_TABLE_SELF_SEGMENTS);
+	}
+	EXIT_IF((m_self != nullptr) != (kyty_elf_is_self(parsed) != 0));
+
+	m_ehdr = CopyOne<Elf64_Ehdr>(parsed, KYTY_ELF_TABLE_EHDR);
+
+	if (!IsValid()) {
+		m_ehdr.reset();
+	}
+
+	if (m_ehdr != nullptr) {
+		m_phdr = CopyTable<Elf64_Phdr>(parsed, KYTY_ELF_TABLE_PHDRS);
+		if (m_self == nullptr) {
+			m_shdr                  = CopyTable<Elf64_Shdr>(parsed, KYTY_ELF_TABLE_SHDRS);
+			uint64_t str_table_size = 0;
+			m_str_table      = CopyTable<char>(parsed, KYTY_ELF_TABLE_STRTAB, &str_table_size);
+			m_str_table_size = static_cast<uint32_t>(str_table_size);
+		} else if (m_ehdr->e_shnum != 0) {
+			LOGF("SELF: skipping ELF section table: shoff=0x%016" PRIx64 ", shnum=%" PRIu16 "\n",
+			     m_ehdr->e_shoff, m_ehdr->e_shnum);
+		}
+#else
 	m_self = LoadSelf(*m_f);
 
 	if (!IsSelf()) {
@@ -572,6 +660,7 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 			LOGF("SELF: skipping ELF section table: shoff=0x%016" PRIx64 ", shnum=%" PRIu16 "\n",
 			     m_ehdr->e_shoff, m_ehdr->e_shnum);
 		}
+#endif
 
 		for (Elf64_Half i = 0; i < m_ehdr->e_phnum; i++) {
 			switch (m_phdr[i].p_type) {

@@ -38,9 +38,15 @@ Commits stay local until the owner explicitly approves each push.
 - **C++**: C++20, Clang/clang-cl only (MSVC `cl.exe` unsupported), upstream `.clang-format`.
   Keep platform splits as `#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS / ... LINUX` like the
   surrounding code (macOS rides the Linux path).
-- **Rust** (new modules): one crate per subsystem, `crate-type = ["staticlib"]`, C ABI
-  (`#[no_mangle] extern "C"`, `#[repr(C)]` types), no `unsafe` outside the FFI layer, no panics
-  across the boundary, `cargo test` + fuzz target for any parser. Integrated through CMake.
+- **Rust** (new modules): one crate per subsystem under `rust/<crate>/`, `crate-type =
+  ["staticlib", "rlib"]`, C ABI (`#[no_mangle] extern "C"`) with a hand-written header in
+  `rust/<crate>/include/`, no `unsafe` outside `ffi.rs`, `panic = "abort"` in release (never
+  unwind into C++), `cargo test` incl. a deterministic fuzz test for any parser, `cargo clippy`
+  clean, `Cargo.lock` committed (builds use `--locked`). Each crate ships a `<crate>.cmake` that
+  builds it with cargo, exposes an IMPORTED target and registers its tests with ctest; a
+  `KYTY_RUST_*` option falls back to the C++ path when cargo is missing.
+- Existing Rust modules: `rust/kyty_elf` — bounds-checked SELF/ELF header table reader used by
+  `Loader::Elf64::Open` (`KYTY_RUST_ELF`, default ON). C++ keeps the file I/O and `IsValid`.
 
 ## Build (Windows)
 

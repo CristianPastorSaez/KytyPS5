@@ -1,0 +1,17 @@
+[package]
+name = "kyty_elf"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "Bounds-checked SELF/ELF header and table reader for the KytyPS5 loader (C ABI)"
+publish = false
+
+[lib]
+# staticlib for the C++ build, rlib so `cargo test` can link the unit tests.
+crate-type = ["staticlib", "rlib"]
+
+[profile.release]
+# A panic must never unwind into C++; abort is the fail-safe if an invariant is ever broken.
+panic = "abort"
+lto = true
+codegen-units = 1
