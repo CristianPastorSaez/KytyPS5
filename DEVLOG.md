@@ -5,6 +5,28 @@ exact numbers, open bottlenecks, next steps. Raw data stays in `_Build/bench/` (
 
 ---
 
+## 2026-11-20 — Patch #1: lazy region lookup tables (`fix/lazy-page-tables`, `96986ee6`)
+
+`MemoryTracker` and `PageManager::Impl` replaced `std::make_unique<std::atomic<T*>[]>(2^22)`
+(value-initialised → 32 MiB written per table) with `RegionTable<T>` in `regionDefinitions.h`:
+`calloc`'d `T*[]` accessed through `std::atomic_ref` (same acquire/release). Microbenchmark of
+one 32 MiB table: 6,000 µs / 8,212 faults → 21 µs / 4 faults (`VirtualAlloc`: 15 µs / 4).
+
+Before/after (medians, `run-synthetic.ps1 -Seconds 30`, exact exit counters, first run of new
+binaries discarded):
+
+| Suite | Wall | Page faults | Peak working set | Peak committed |
+|---|---|---|---|---|
+| memory_tracker_tests | 0.364 → **0.090 s** (−75 %) | 280,618 → **1,612** (−99.4 %) | 68.9 → **5.3 MiB** | 73.1 → 73.1 MiB |
+| page_manager_tests | 0.230 → **0.118 s** (−49 %) | 75,336 → **1,484** (−98 %) | 36.9 → **5.2 MiB** | 45.0 → 45.0 MiB |
+
+Committed memory is unchanged by design (calloc commits, the OS only backs touched pages).
+CI set 32/32, `shader_recompiler_compute_tests` passes. In the emulator this saves 64 MiB of
+resident memory and ~16 k faults at boot; in the test suites, per constructed context.
+Baseline binaries kept in `_Build/bench/bin-a1fc5ae4/` for re-runs.
+
+---
+
 ## 2026-11-20 — Environment, baseline, first profile
 
 Base: upstream `a1fc5ae4`. Host: i7-13700KF (24 threads), 32 GB, RTX 3060 (driver 610.88,
@@ -70,5 +92,5 @@ Not measurable with this baseline: asset streaming and runtime shader-compile st
 open-world games (#1937) — needs a real title run locally with Tracy.
 
 ### Next
-- Patch #1: lazy OS-zeroed tables, before/after on `memory_tracker_tests` / `page_manager_tests`.
+- ~~Patch #1~~ done (see entry above).
 - Then: `kyty_elf` Rust crate.
