@@ -5,6 +5,30 @@ exact numbers, open bottlenecks, next steps. Raw data stays in `_Build/bench/` (
 
 ---
 
+## 2026-11-20 — Presentation loop at idle (Tracy) — earlier GPU claim retracted
+
+Built `tracy-capture` and `tracy-csvexport` 0.14.1 (same version as the client in
+`3rdparty/tracy`) into `_Build/`. Run: homebrew `hello_world` (never opens VideoOut),
+`--profile --no-splash`, 25 s capture, `nvidia-smi pmon` filtered to the emulator PID.
+
+- **Correction:** the baseline's "GPU 30 % vs 4.5 % idle" compared system-wide utilisation at
+  two moments. Per-process `pmon` shows Chrome alone swinging 2–46 % SM on this machine. The
+  emulator's own share was `-` (below threshold) in one 8 s window and 10.5 % mean (21.9 % when
+  sampled) in another. Its GPU cost at idle is real but small and noisy; "25 points" is wrong.
+- Tracy: `VideoOutDriver::Impl::PresentThread` presents a **blank 1280×720 frame on every
+  vblank** — 1,507 × `Presenter::Present` + `PrepareBlankFrame` in 25 s (60 Hz) although the
+  guest has no VideoOut port open. CPU cost: `Present` 142 µs mean (max 14.8 ms, first
+  frames), `PrepareBlankFrame` 41 µs → ≈0.9 % of one core.
+- Source (`videoOut.cpp:822-839`): blank frames are presented when the system overlay needs a
+  refresh (`NeedsSystemOverlayRefresh`) or on a late vblank with no port open. Which branch
+  fires here is not yet determined (no counter or zone separates them).
+
+Status: low priority. A "present only on change" idle path would save a 60 Hz clear+blit, but
+the overlay may depend on it. Next: separate the two branches (Tracy zone/plot), then GPU
+timestamps if the cost justifies it.
+
+---
+
 ## 2026-11-20 — Module #2: `kyty_elf` Rust crate (ELF/SELF header tables)
 
 Problem: `elf.cpp` read the SELF segment table, program/section header tables and the
@@ -106,8 +130,9 @@ synchronous writes through `fltMgr.sys` (on-access scanning). Not a code issue.
   `main: Hello world!`. 8 libkernel imports unresolved (stubbed); `BPE9s9vQQXo` is hit during
   `printf`.
 - 60 s monitored: steady state in < 3 s; 1.8 GB private, 767 MB working set, 222 k page faults
-  (all during boot), 30 threads. **GPU 30 % with nothing drawn vs 4.5 % idle desktop** (+1 GB
-  VRAM).
+  (all during boot), 30 threads. ~~GPU 30 % with nothing drawn vs 4.5 % idle desktop~~
+  **Retracted** — system-wide GPU % taken at different moments; Chrome alone swings 2–46 %. See
+  the "Presentation loop" entry.
 
 ### Real bottlenecks (measured and cross-checked with source)
 1. `MemoryTracker` (`memoryTracker.cpp:11`) and `PageManager::Impl` (`pageManager.cpp:154`)
@@ -116,7 +141,8 @@ synchronous writes through `fltMgr.sys` (on-access scanning). Not a code issue.
    ever used. → **Patch #1.**
 2. Guest direct memory is a 12 GiB `SEC_COMMIT` section committed at boot
    (`memoryAddressSpace.inc:40`); fails on small page files. Commit-on-demand is a larger change.
-3. Present/vblank loop costs ~25 GPU points with no guest work → investigate with Tracy.
+3. ~~Present/vblank loop costs ~25 GPU points with no guest work~~ — retracted, see the
+   "Presentation loop" entry.
 4. ELF/SELF loader reads header tables without bounds checks (`elf.cpp:24-125`) → robustness /
    security, candidate for the Rust `kyty_elf` crate.
 
