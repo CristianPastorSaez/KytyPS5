@@ -1,3 +1,16 @@
+> [!NOTE]
+> **About this fork (`dev/ps5-architecture`).** This is a personal engineering fork of
+> [KytyPS5/KytyPS5](https://github.com/KytyPS5/KytyPS5), focused on the **memory and I/O
+> subsystems**: measuring real bottlenecks (ETW/WPR, Tracy, synthetic suites), fixing them in C++
+> with before/after numbers, and adding **memory-safe Rust modules** (C-ABI `staticlib`s built
+> through CMake) where untrusted input is parsed, starting with the ELF/SELF loader.
+> Fixes meant for upstream are developed on clean branches cut from `main`; this branch also
+> carries the fork's own notes: [`DEVLOG.md`](DEVLOG.md) (measurements and progress) and
+> [`CLAUDE.md`](CLAUDE.md) (conventions for AI-assisted work). The work is clean-room only:
+> no Sony keys, firmware, `.prx` modules or commercial game data are used or distributed.
+> All credit for KytyPS5 goes to its authors; everything below is the upstream README, and the
+> project remains under the [GPL-2.0](LICENSE) license.
+
 # KytyPS5
 
 [![Build KytyPS5 (Windows)](https://img.shields.io/github/check-runs/KytyPS5/KytyPS5/main?nameFilter=Build%20KytyPS5%20%28Windows%29&label=Build%20KytyPS5%20%28Windows%29)](https://github.com/KytyPS5/KytyPS5/actions/workflows/build.yml)
