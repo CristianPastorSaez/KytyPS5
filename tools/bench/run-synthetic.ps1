@@ -32,6 +32,24 @@ if ($Exe) { $Suites = @($Label) }
 
 $gpu = Start-Process nvidia-smi -ArgumentList "--query-gpu=timestamp,utilization.gpu,utilization.memory,memory.used,power.draw,clocks.sm --format=csv -lms $SampleMs -f `"$out\gpu.csv`"" -WindowStyle Hidden -PassThru
 
+# Exact per-process totals, readable from the handle after exit (sampling misses short runs).
+Add-Type -Namespace Bench -Name Psapi -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)]
+public struct Counters {
+	public uint cb; public uint PageFaultCount; public UIntPtr PeakWorkingSetSize; public UIntPtr WorkingSetSize;
+	public UIntPtr QuotaPeakPagedPoolUsage; public UIntPtr QuotaPagedPoolUsage; public UIntPtr QuotaPeakNonPagedPoolUsage;
+	public UIntPtr QuotaNonPagedPoolUsage; public UIntPtr PagefileUsage; public UIntPtr PeakPagefileUsage;
+}
+[DllImport("psapi.dll", SetLastError = true)]
+public static extern bool GetProcessMemoryInfo(IntPtr process, out Counters counters, uint size);
+'@
+function Get-ExitCounters($handle) {
+	$c = New-Object Bench.Psapi+Counters
+	$c.cb = [Runtime.InteropServices.Marshal]::SizeOf($c)
+	if (-not [Bench.Psapi]::GetProcessMemoryInfo($handle, [ref]$c, $c.cb)) { return $null }
+	$c
+}
+
 $samples = [System.Collections.Generic.List[object]]::new()
 $runs = [System.Collections.Generic.List[object]]::new()
 $t0 = [Diagnostics.Stopwatch]::StartNew()
@@ -41,11 +59,11 @@ try {
 		$iter++
 		foreach ($s in $Suites) {
 			if ($t0.Elapsed.TotalSeconds -ge $Seconds) { break }
-			$exe = if ($Exe) { $Exe } else { Join-Path $BinDir "${s}_tests.exe" }
-			if (-not (Test-Path $exe)) { Write-Warning "missing $exe"; continue }
+			$exePath = if ($Exe) { $Exe } else { Join-Path $BinDir "${s}_tests.exe" }
+			if (-not (Test-Path $exePath)) { Write-Warning "missing $exePath"; continue }
 			$log = "$out\stdout\$s-$iter.log"
 			$extra = if ($ExeArgs) { @{ ArgumentList = $ExeArgs } } else { @{} }
-			$p = Start-Process $exe @extra -WorkingDirectory $BinDir -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden -PassThru
+			$p = Start-Process $exePath @extra -WorkingDirectory $BinDir -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden -PassThru
 			$h = $p.Handle # keep handle so exit code / times stay readable after exit
 			$start = $t0.Elapsed.TotalSeconds
 			$last = $null; $maxThreads = 0
@@ -66,14 +84,16 @@ try {
 				Start-Sleep -Milliseconds $SampleMs
 			}
 			$p.WaitForExit()
-			$wall = $t0.Elapsed.TotalSeconds - $start
+			$wall = ($p.ExitTime - $p.StartTime).TotalSeconds # exact, unlike the sampling loop
 			$cpu = $p.TotalProcessorTime.TotalSeconds
+			$ec = Get-ExitCounters $h
 			$runs.Add([pscustomobject]@{
 				suite = $s; iter = $iter; exit = $p.ExitCode; wall_s = [math]::Round($wall, 3); cpu_s = [math]::Round($cpu, 3)
 				cpu_util_pct = [math]::Round(100 * $cpu / [math]::Max($wall, 0.001) / $cores, 1)
-				peak_ws_mb = [math]::Round($p.PeakWorkingSet64 / 1MB, 1)
-				peak_private_mb = if ($last) { ($samples | Where-Object { $_.suite -eq $s -and $_.iter -eq $iter } | Measure-Object private_mb -Maximum).Maximum } else { $null }
-				page_faults = $last.page_faults; io_read_mb = $last.io_read_mb; io_write_mb = $last.io_write_mb; max_threads = $maxThreads
+				peak_ws_mb = if ($ec) { [math]::Round($ec.PeakWorkingSetSize.ToUInt64() / 1MB, 1) } else { $null }
+				peak_private_mb = if ($ec) { [math]::Round($ec.PeakPagefileUsage.ToUInt64() / 1MB, 1) } else { $null }
+				page_faults = if ($ec) { $ec.PageFaultCount } else { $last.page_faults }
+				io_read_mb = $last.io_read_mb; io_write_mb = $last.io_write_mb; max_threads = $maxThreads
 			})
 			Write-Host ("{0,-28} it{1} exit={2} {3,7:N2}s" -f $s, $iter, $p.ExitCode, $wall)
 		}
