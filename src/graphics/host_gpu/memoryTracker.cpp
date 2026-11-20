@@ -7,9 +7,7 @@ namespace Libs::Graphics {
 
 static_assert(std::atomic<void*>::is_always_lock_free);
 
-MemoryTracker::MemoryTracker(PageManager& page_manager): m_page_manager(page_manager) {
-	m_regions = std::make_unique<std::atomic<RegionManager*>[]>(REGION_COUNT);
-}
+MemoryTracker::MemoryTracker(PageManager& page_manager): m_page_manager(page_manager) {}
 
 MemoryTracker::~MemoryTracker() = default;
 
@@ -52,17 +50,17 @@ void MemoryTracker::ValidateRange(uint64_t vaddr, uint64_t size) {
 }
 
 RegionManager* MemoryTracker::GetOrCreateRegion(uint64_t index) {
-	if (auto* manager = m_regions[index].load(std::memory_order_acquire); manager != nullptr) {
+	if (auto* manager = m_regions.Load(index); manager != nullptr) {
 		return manager;
 	}
 	std::lock_guard lock(m_region_mutex);
-	if (auto* manager = m_regions[index].load(std::memory_order_acquire); manager != nullptr) {
+	if (auto* manager = m_regions.Load(index); manager != nullptr) {
 		return manager;
 	}
 	auto  manager = std::make_unique<RegionManager>(m_page_manager, index * TRACKER_REGION_SIZE);
 	auto* ptr     = manager.get();
 	m_region_storage.push_back(std::move(manager));
-	m_regions[index].store(ptr, std::memory_order_release);
+	m_regions.Store(index, ptr);
 	return ptr;
 }
 
